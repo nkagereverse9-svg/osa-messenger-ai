@@ -1,4 +1,5 @@
 import os
+<<<<<<< HEAD
 import json
 import time
 import hashlib
@@ -30,10 +31,32 @@ NK_OFFICIAL_DOMAIN = "nkarofficial.com"
 # (Render Free instance may sleep => memory resets sometimes)
 # =========================
 USER_STATE: Dict[str, Dict[str, Any]] = {}
+=======
+
+app = FastAPI()
+
+VERIFY_TOKEN = "nkverify123"
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
+
+
+@app.get("/")
+def home():
+    return {"status": "Messenger AI running"}
+
+
+# Facebook verification
+@app.get("/webhook")
+async def verify(request: Request):
+    params = request.query_params
+
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == VERIFY_TOKEN:
+        return int(params.get("hub.challenge"))
+>>>>>>> 93cfbb2 (fix port binding)
 
 def now_ts() -> int:
     return int(time.time())
 
+<<<<<<< HEAD
 def get_state(psid: str) -> Dict[str, Any]:
     if psid not in USER_STATE:
         USER_STATE[psid] = {
@@ -67,9 +90,41 @@ def send_text_message(psid: str, text: str):
         "recipient": {"id": psid},
         "message": {"text": text},
         "messaging_type": "RESPONSE",
+=======
+
+# Receive messages
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+
+    if "entry" in data:
+        for entry in data["entry"]:
+            for messaging in entry["messaging"]:
+                if "message" in messaging:
+
+                    sender_id = messaging["sender"]["id"]
+                    message_text = messaging["message"].get("text", "")
+
+                    send_message(sender_id, f"You said: {message_text}")
+
+    return {"status": "ok"}
+
+
+def send_message(recipient_id, text):
+    url = "https://graph.facebook.com/v18.0/me/messages"
+
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text}
+    }
+
+    params = {
+        "access_token": PAGE_ACCESS_TOKEN
+>>>>>>> 93cfbb2 (fix port binding)
     }
     params = {"access_token": PAGE_ACCESS_TOKEN}
 
+<<<<<<< HEAD
     try:
         r = requests.post(url, params=params, json=payload, timeout=20)
         if r.status_code != 200:
@@ -339,3 +394,6 @@ async def webhook(request: Request):
                 add_history(sender, "assistant", ai_reply)
 
     return Response(status_code=200)
+=======
+    requests.post(url, params=params, json=payload)
+>>>>>>> 93cfbb2 (fix port binding)
