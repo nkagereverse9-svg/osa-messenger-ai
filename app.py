@@ -1,286 +1,255 @@
 import os
 import time
+import json
+import asyncio
+from typing import Dict, Any, Optional
+
 import requests
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, Response
 
 app = FastAPI()
 
-# =========================
-# ENV (Render)
-# =========================
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "nkverify123").strip()
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
-
-AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").strip().lower()  # groq
-AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
-AI_MODEL = os.getenv("AI_MODEL", "llama-3.1-8b-instant").strip()
-
-GRAPH_URL = "https://graph.facebook.com/v20.0/me/messages"
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "nkverify123")
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
 
 # =========================
-# OFFICIAL NKAR FACTS (locked)
+# AGENCY SYSTEM PROMPT
 # =========================
-CATALOG_URL = "https://nkarofficial.com/our-products/"
-PRODUCTS = [
-    {
-        "name": "NK Age-Reverse Cleanser 100ML",
-        "price": "RM149.00",
-        "url": "https://nkarofficial.com/our-products/skincare/nk-age-reverse-cleanser/",
-        "notes": [
-            "Gentle cleanse; supports smoother-looking skin",
-            "Helps appearance of fine lines & wrinkles (marketing claim on official page)",
-            "Suitable for all skin types (official page)",
-            "Key ingredients listed: Hyaluronic Acid, Bee Venom, Roselle, Tsubaki, essential oils"
-        ],
-    },
-    {
-        "name": "NK Age-Reverse Sunscreen 30ML",
-        "price": "RM169.00",
-        "url": "https://nkarofficial.com/our-products/skincare/nk-age-reverse-sunscreen/",
-        "notes": [
-            "Daytime protection; suitable all skin types (official page)",
-        ],
-    },
-    {
-        "name": "NK Age-Reverse Serum 30ML",
-        "price": "RM229.00",
-        "url": "https://nkarofficial.com/our-products/skincare/age-reverse-serum-30ml/",
-        "notes": [
-            "Serum option in NK Age-Reverse line (official page)",
-        ],
-    },
-    {
-        "name": "Energy Water Mist 100ML",
-        "price": "RM139.00",
-        "url": "https://nkarofficial.com/our-products/skincare/energy-water-mist/",
-        "notes": [
-            "Mist option in NK line (official page)",
-        ],
-    },
-    {
-        "name": "NK Age-Reverse Oil Cleanser",
-        "price": "RM129.00 (price may show promo on site)",
-        "url": "https://nkarofficial.com/our-products/skincare/nk-age-reverse-oil-cleanser/",
-        "notes": [
-            "Oil cleanser for double cleansing (official page)",
-        ],
-    },
-    {
-        "name": "NK Age-Reverse Travel Set",
-        "price": "RM249.00",
-        "url": "https://nkarofficial.com/our-products/skincare/nk-age-reverse-travel-set/",
-        "notes": [
-            "Travel set option (official page)",
-        ],
-    },
-    {
-        "name": "NK Age-Reverse Premium Box",
-        "price": "RM649.00",
-        "url": "https://nkarofficial.com/our-products/skincare/nk-age-reverse-premium-box/",
-        "notes": [
-            "Full set option (official page)",
-        ],
-    },
-    {
-        "name": "[Limited Edition] NK Age-Reverse Raya Gift Set",
-        "price": "RM188.00",
-        "url": "https://nkarofficial.com/our-products/skincare/limited-edition-nk-age-reverse-raya-gift-set/",
-        "notes": [
-            "Limited edition set (official page)",
-        ],
-    },
-]
+SYSTEM_PROMPT = """
+You are NK Age-Reverse AI Beauty Consultant & Sales Closer.
 
-def product_list_text() -> str:
-    lines = []
-    for p in PRODUCTS:
-        lines.append(f"- {p['name']} — {p['price']} — {p['url']}")
-    return "\n".join(lines)
+MISSION:
+Solve customer's skin concern and guide them naturally to purchase NK Age-Reverse products.
 
-NK_SYSTEM = f"""
-You are the official NK Age-Reverse Skincare Assistant for Facebook Messenger.
+STYLE:
+- Bahasa Melayu santai + professional (macam consultant).
+- 3-5 ayat, pendek, jelas.
+- Tanya 1 soalan follow-up setiap reply.
+- Jangan bunyi robot. Jangan sebut "AI".
 
-TONE:
-- Friendly Malaysian beauty consultant
-- Reply in user's language (Malay if Malay, English if English, mixed if mixed)
-- Short-to-medium replies, 1–2 emojis max
-- Always ask ONE helpful follow-up question
-- Soft selling: help first, then guide to order
+SALES FLOW:
+1) Greet
+2) Identify concern
+3) Ask diagnostic questions
+4) Educate briefly
+5) Recommend suitable NK product
+6) Build trust
+7) Soft close + link bila nampak intent
 
-SAFETY:
-- No medical diagnosis, no guaranteed results
-- If user reports irritation/rash/burning: advise stop use, rinse, and seek medical advice if severe
+PRODUCTS (use these facts):
+- NK Age-Reverse Cleanser: gentle cleanse, tidak keringkan kulit, support anti-aging, bantu skin barrier, bee venom.
+- NK Age-Reverse Serum 30ml: elasticity, fine lines, collagen support, brightening.
 
-OFFICIAL LINKS:
-- Catalog: {CATALOG_URL}
-
-OFFICIAL PRODUCTS + PRICES + LINKS (DO NOT INVENT):
-{product_list_text()}
+OFFICIAL LINK:
+https://nkarofficial.com/
 
 RULES:
-- If user asks price/order: state the official price and provide the official link.
-- If user asks about other products: give brief overview + share catalog link, do not invent extra claims/ingredients.
-- If user is new: recommend starting with Cleanser; for daytime suggest Sunscreen; suggest Serum/Mist based on concern.
-- End every reply with a gentle question to continue conversation.
-""".strip()
+- If user says "hi/hello" → terus start consultation (tanya masalah kulit).
+- If user ask product lain → jawab secara umum + bawa ke link "our products" / tanya nama produk.
+- If user tanya harga/order → bagi link order.
+"""
+
+ORDER_LINK = "https://nkarofficial.com/"
+PRODUCTS_LINK = "https://nkarofficial.com/our-products/"
 
 # =========================
-# Simple in-memory memory (resets if Render restarts)
+# Simple lead memory (in RAM)
+# NOTE: On free Render, service can restart -> memory reset
 # =========================
-MEM = {}  # psid -> [(role, content, ts)]
+user_state: Dict[str, Dict[str, Any]] = {}
+followup_tasks: Dict[str, asyncio.Task] = {}  # psid -> task
 
-def add_mem(psid: str, role: str, content: str):
-    MEM.setdefault(psid, []).append((role, content, time.time()))
-    MEM[psid] = MEM[psid][-8:]
 
-def get_mem(psid: str):
-    return MEM.get(psid, [])
-
-def detect_lang(text: str) -> str:
+# =========================
+# Helpers
+# =========================
+def detect_buying_intent(text: str) -> bool:
+    keywords = [
+        "harga", "price", "berapa", "how much",
+        "nak beli", "order", "beli", "purchase",
+        "link", "checkout", "cod", "pos"
+    ]
     t = (text or "").lower()
-    bm = sum(w in t for w in ["saya","nak","berapa","harga","macam","cara","guna","kulit","sesuai","promo","beli","pos","negeri","salam","hai"])
-    en = sum(w in t for w in ["price","how","use","skin","suitable","order","delivery","hello","hi"])
-    if bm > en + 1:
-        return "ms"
-    if en > bm + 1:
-        return "en"
-    return "mix"
+    return any(k in t for k in keywords)
 
-# =========================
-# AI Call (Groq OpenAI-compatible)
-# =========================
-def call_ai(messages):
-    if not AI_API_KEY or AI_PROVIDER != "groq":
-        return None
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": AI_MODEL, "messages": messages, "temperature": 0.6}
-    r = requests.post(url, headers=headers, json=payload, timeout=25)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
 
-# =========================
-# Fallback replies (if AI not available)
-# =========================
-def fallback_reply(text: str) -> str:
-    lang = detect_lang(text)
+def stage_from_text(text: str) -> str:
     t = (text or "").lower()
+    if detect_buying_intent(t):
+        return "hot"
+    if any(k in t for k in ["kering", "jerawat", "berminyak", "parut", "sensitif", "garis halus", "wrinkle", "kusam"]):
+        return "warm"
+    if any(k in t for k in ["hi", "hello", "hai", "assalam", "salam"]):
+        return "cold"
+    return "warm"
 
-    if any(k in t for k in ["harga","price","promo","order","beli","checkout"]):
-        return (
-            "Boleh 😊 Produk mana yang anda maksudkan ya? (Cleanser / Sunscreen / Serum / Mist / Oil Cleanser / Travel Set / Premium Box)\n"
-            f"Catalog official: {CATALOG_URL}\n\n"
-            "Anda berada di negeri/bandar mana untuk delivery?"
-        ) if lang != "en" else (
-            "Sure 😊 Which product do you mean? (Cleanser / Sunscreen / Serum / Mist / Oil Cleanser / Travel Set / Premium Box)\n"
-            f"Official catalog: {CATALOG_URL}\n\n"
-            "Which state/city are you in for delivery?"
-        )
 
-    return (
-        "Hi 😊 Saya boleh bantu pasal NK Age-Reverse.\n"
-        "Boleh share jenis kulit anda (kering/berminyak/sensitif) & fokus masalah apa? ✨"
-    ) if lang != "en" else (
-        "Hi 😊 I can help with NK Age-Reverse.\n"
-        "What’s your skin type (dry/oily/sensitive) and your main concern? ✨"
-    )
-
-# =========================
-# Smart reply function
-# =========================
-def smart_reply(psid: str, user_text: str) -> str:
-    t = (user_text or "").lower()
-    lang = detect_lang(user_text)
-
-    # Safety hard-rule
-    if any(k in t for k in ["ruam","gatal","pedih","rash","itch","burn","burning","irritation","merah"]):
-        return (
-            "Maaf awak alami macam tu 😥\n\n"
-            "Untuk keselamatan:\n"
-            "✅ Stop guna dulu\n✅ Bilas dengan air bersih\n"
-            "✅ Jika teruk/berpanjangan, jumpa doktor\n\n"
-            "Boleh share jenis kulit (kering/berminyak/sensitif) & produk NK yang awak guna?"
-        ) if lang != "en" else (
-            "Sorry you’re experiencing that 😥\n\n"
-            "For safety:\n"
-            "✅ Stop using it for now\n✅ Rinse with clean water\n"
-            "✅ If severe/persistent, see a doctor\n\n"
-            "What’s your skin type (dry/oily/sensitive) and which NK product did you use?"
-        )
-
-    # Build messages with memory
-    msgs = [{"role": "system", "content": NK_SYSTEM}]
-    for role, content, _ts in get_mem(psid):
-        msgs.append({"role": role, "content": content})
-    msgs.append({"role": "user", "content": user_text})
-
-    # Try AI
-    try:
-        ai = call_ai(msgs)
-        if ai and ai.strip():
-            return ai.strip()
-    except Exception as e:
-        print("AI error:", e)
-
-    # Fallback
-    return fallback_reply(user_text)
-
-# =========================
-# Send message to FB
-# =========================
-def send_text_message(psid: str, text: str):
+def graph_api_send_message(psid: str, text: str) -> None:
     if not PAGE_ACCESS_TOKEN:
         print("ERROR: PAGE_ACCESS_TOKEN missing")
         return
 
-    payload = {"recipient": {"id": psid}, "message": {"text": text}}
+    url = "https://graph.facebook.com/v19.0/me/messages"
+    payload = {
+        "recipient": {"id": psid},
+        "message": {"text": text}
+    }
     params = {"access_token": PAGE_ACCESS_TOKEN}
-    r = requests.post(GRAPH_URL, params=params, json=payload, timeout=15)
+    r = requests.post(url, params=params, json=payload, timeout=30)
     if r.status_code >= 400:
         print("FB SEND ERROR:", r.status_code, r.text)
+
+
+def groq_chat(user_text: str, context: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Call Groq OpenAI-compatible endpoint.
+    """
+    if not GROQ_API_KEY:
+        return "Saya boleh bantu 😊 Boleh share masalah kulit awak dulu—kering, berminyak, jerawat atau garis halus?"
+
+    # Lightweight context injection
+    ctx_lines = []
+    if context:
+        stage = context.get("stage")
+        skin = context.get("skin_type")
+        if stage:
+            ctx_lines.append(f"Lead stage: {stage}")
+        if skin:
+            ctx_lines.append(f"Skin info: {skin}")
+
+    ctx = "\n".join(ctx_lines).strip()
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT + (f"\n\nCONTEXT:\n{ctx}" if ctx else "")},
+        {"role": "user", "content": user_text}
+    ]
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.6,
+        "max_tokens": 220
+    }
+
+    r = requests.post(url, headers=headers, json=body, timeout=40)
+    if r.status_code >= 400:
+        print("GROQ ERROR:", r.status_code, r.text)
+        return "Maaf ya, sistem tengah sibuk sikit. Awak boleh bagitahu masalah kulit utama awak dulu? 😊"
+
+    data = r.json()
+    return data["choices"][0]["message"]["content"].strip()
+
+
+async def schedule_followups(psid: str):
+    """
+    Send follow-ups if user becomes inactive.
+    Two pings: 15 min and 60 min from last user message.
+    Cancelled automatically if user sends new message (we cancel task).
+    """
+    try:
+        # Wait 15 minutes
+        await asyncio.sleep(15 * 60)
+        st = user_state.get(psid, {})
+        last_ts = st.get("last_user_ts", 0)
+        if time.time() - last_ts >= 15 * 60:
+            # 15-min follow-up (soft)
+            msg = "Saya nak pastikan saya bantu betul 😊 Kulit awak lebih cenderung *kering* atau *berminyak* ya?"
+            graph_api_send_message(psid, msg)
+
+        # Wait until 60 minutes (another 45 min)
+        await asyncio.sleep(45 * 60)
+        st = user_state.get(psid, {})
+        last_ts = st.get("last_user_ts", 0)
+        if time.time() - last_ts >= 60 * 60:
+            # 60-min follow-up (CTA)
+            msg = (
+                "Kalau awak nak saya recommend routine paling simple ikut masalah kulit awak, saya boleh guide step-by-step 😊\n"
+                f"Kalau nak tengok semua produk official: {PRODUCTS_LINK}"
+            )
+            graph_api_send_message(psid, msg)
+
+    except asyncio.CancelledError:
+        # normal cancellation
+        return
+    except Exception as e:
+        print("FOLLOWUP ERROR:", str(e))
+
+
+def reset_followup(psid: str):
+    # cancel old followup task
+    old = followup_tasks.get(psid)
+    if old and not old.done():
+        old.cancel()
+
+    # schedule new followups
+    followup_tasks[psid] = asyncio.create_task(schedule_followups(psid))
+
 
 # =========================
 # Routes
 # =========================
-@app.get("/", response_class=PlainTextResponse)
-def home():
-    return "OK"
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
 
-@app.get("/webhook", response_class=PlainTextResponse)
-def verify_webhook(request: Request):
-    q = request.query_params
-    mode = q.get("hub.mode")
-    token = q.get("hub.verify_token")
-    challenge = q.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return Response(content=challenge or "", media_type="text/plain")
+    return Response(content="Verification token mismatch", status_code=403)
 
-    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
-        return challenge
-
-    raise HTTPException(status_code=403, detail="Verification failed")
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
+async def receive_webhook(request: Request):
+    body = await request.json()
 
-    if data.get("object") != "page":
-        return {"ok": True}
+    # Facebook sends multiple events
+    if body.get("object") != "page":
+        return {"status": "ignored"}
 
-    for entry in data.get("entry", []):
-        for event in entry.get("messaging", []):
-            psid = event.get("sender", {}).get("id")
-            if not psid:
+    entries = body.get("entry", [])
+    for entry in entries:
+        messaging_events = entry.get("messaging", [])
+        for event in messaging_events:
+            sender = event.get("sender", {}).get("id")
+            message = event.get("message", {})
+            text = message.get("text")
+
+            # Ignore echoes (page messages sent by itself)
+            if message.get("is_echo"):
                 continue
 
-            msg = event.get("message", {})
-            if msg and "text" in msg:
-                user_text = (msg.get("text") or "").strip()
-                if not user_text:
-                    continue
+            if sender and text:
+                # Update state
+                st = user_state.get(sender, {})
+                st["last_user_ts"] = time.time()
+                st["stage"] = max(st.get("stage", "cold"), stage_from_text(text), key=lambda x: ["cold","warm","hot"].index(x))
+                user_state[sender] = st
 
-                add_mem(psid, "user", user_text)
-                reply = smart_reply(psid, user_text)
-                add_mem(psid, "assistant", reply)
-                send_text_message(psid, reply)
+                # Schedule follow-ups again
+                reset_followup(sender)
 
-    return {"ok": True}
+                # AI reply
+                ai_reply = groq_chat(text, context=st)
+
+                # Add order link if buying intent
+                if detect_buying_intent(text):
+                    ai_reply += f"\n\nBoleh order terus di sini ya 😊\n{ORDER_LINK}"
+
+                graph_api_send_message(sender, ai_reply)
+
+    return {"status": "ok"}
+
+
+@app.get("/")
+async def health():
+    return {"ok": True, "service": "osa-messenger-ai"}
+
