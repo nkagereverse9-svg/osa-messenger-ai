@@ -1,399 +1,237 @@
 import os
-<<<<<<< HEAD
-import json
 import time
-import hashlib
-from typing import Dict, Any, Optional, List
+import json
+import re
+from typing import Dict, Any
 
 import requests
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse, JSONResponse
 
-app = FastAPI()
-
-# =========================
+# =====================================================
 # ENV
-# =========================
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
+# =====================================================
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").strip().lower()
-AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
-AI_MODEL = os.getenv("AI_MODEL", "llama3-8b-8192").strip()
+AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_MODEL = os.getenv("AI_MODEL", "llama-3.1-8b-instant")
 
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip()
+OFFICIAL_DOMAIN = "nkarofficial.com"
+OFFICIAL_ORDER_LINK = "https://nkarofficial.com/our-products/skincare/"
 
-NK_OFFICIAL_PRODUCTS = "https://nkarofficial.com/our-products/skincare/"
-NK_OFFICIAL_DOMAIN = "nkarofficial.com"
+# =====================================================
+# PRODUCT CATALOG (SOURCE OF TRUTH)
+# =====================================================
+PRODUCT_CATALOG = [
+    {
+        "name": "NK Age-Reverse Cleanser",
+        "category": "cleanser",
+        "for_skin": ["berminyak","kering","kombinasi","sensitif","jerawat"],
+        "url": OFFICIAL_ORDER_LINK
+    },
+    {
+        "name": "NK Age-Reverse Serum 30ml",
+        "category": "serum",
+        "for_skin": ["garis_halus","kusam","kering"],
+        "url": OFFICIAL_ORDER_LINK
+    }
+]
 
-# =========================
-# SIMPLE IN-MEMORY "STATE"
-# (Render Free instance may sleep => memory resets sometimes)
-# =========================
+# =====================================================
+# USER MEMORY
+# =====================================================
 USER_STATE: Dict[str, Dict[str, Any]] = {}
-=======
 
-app = FastAPI()
-
-VERIFY_TOKEN = "nkverify123"
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
-
-
-@app.get("/")
-def home():
-    return {"status": "Messenger AI running"}
-
-
-# Facebook verification
-@app.get("/webhook")
-async def verify(request: Request):
-    params = request.query_params
-
-    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == VERIFY_TOKEN:
-        return int(params.get("hub.challenge"))
->>>>>>> 93cfbb2 (fix port binding)
-
-def now_ts() -> int:
-    return int(time.time())
-
-<<<<<<< HEAD
-def get_state(psid: str) -> Dict[str, Any]:
+def get_state(psid):
     if psid not in USER_STATE:
         USER_STATE[psid] = {
             "stage": "start",
-            "skin_type": None,
-            "concern": None,
-            "budget": None,
-            "last_seen": now_ts(),
-            "history": []  # short history for context
+            "skin": "",
+            "lead_score": 0,
+            "ready_to_buy": False,
+            "asked_contact": False,
+            "last_seen": time.time()
         }
-    USER_STATE[psid]["last_seen"] = now_ts()
     return USER_STATE[psid]
 
-def add_history(psid: str, role: str, content: str):
-    st = get_state(psid)
-    st["history"].append({"role": role, "content": content})
-    # keep last 8 msgs only
-    st["history"] = st["history"][-8:]
+# =====================================================
+# SALES INTELLIGENCE
+# =====================================================
+def detect_buying_signal(state, text):
+    signals = [
+        "harga","price","order","nak beli",
+        "link","payment","macam mana beli"
+    ]
 
+    if any(s in text.lower() for s in signals):
+        state["lead_score"] += 2
 
-# =========================
-# META MESSENGER SEND API
-# =========================
-def send_text_message(psid: str, text: str):
-    if not PAGE_ACCESS_TOKEN:
-        print("❌ PAGE_ACCESS_TOKEN missing")
-        return
+    if state["lead_score"] >= 3:
+        state["ready_to_buy"] = True
 
-    url = "https://graph.facebook.com/v20.0/me/messages"
-    payload = {
-        "recipient": {"id": psid},
-        "message": {"text": text},
-        "messaging_type": "RESPONSE",
-=======
+def extract_phone(text):
+    m = re.search(r'(\+?6?01[0-9\- ]{7,10})', text)
+    return m.group(1) if m else None
 
-# Receive messages
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
+# =====================================================
+# PROMPT (REVENUE MODE)
+# =====================================================
+def catalog_text():
+    return "\n".join(
+        [f"- {p['name']} ({p['category']})" for p in PRODUCT_CATALOG]
+    )
 
-    if "entry" in data:
-        for entry in data["entry"]:
-            for messaging in entry["messaging"]:
-                if "message" in messaging:
-
-                    sender_id = messaging["sender"]["id"]
-                    message_text = messaging["message"].get("text", "")
-
-                    send_message(sender_id, f"You said: {message_text}")
-
-    return {"status": "ok"}
-
-
-def send_message(recipient_id, text):
-    url = "https://graph.facebook.com/v18.0/me/messages"
-
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {"text": text}
-    }
-
-    params = {
-        "access_token": PAGE_ACCESS_TOKEN
->>>>>>> 93cfbb2 (fix port binding)
-    }
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-
-<<<<<<< HEAD
-    try:
-        r = requests.post(url, params=params, json=payload, timeout=20)
-        if r.status_code != 200:
-            print("❌ Send API error:", r.status_code, r.text)
-    except Exception as e:
-        print("❌ Send API exception:", str(e))
-
-
-# =========================
-# AI (Groq OpenAI-Compatible)
-# =========================
 SYSTEM_PROMPT = f"""
-Anda adalah NK Age-Reverse AI (Malaysia). Tugas: bantu pelanggan memilih skincare NK dan convert kepada order.
+Anda NK Age-Reverse AI — Professional Skincare Consultant & Sales Closer.
 
-RULES (WAJIB):
-1) Gaya bahasa: BM santai + mesra + ringkas tapi convincing. Jangan terlalu panjang meleret.
-2) Fokus sales: tanya soalan susulan yang tepat untuk qualify lead (jenis kulit, masalah utama, rutin sekarang, bajet, dan target result).
-3) Bila pelanggan tanya produk NK apa-apa, jawab dan bagi link rasmi dari domain {NK_OFFICIAL_DOMAIN} jika sesuai.
-4) Jangan claim benda pelik/medical. Jika isu serius (ruam teruk/alergi) sarankan patch test & jumpa doktor.
-5) Sentiasa akhiri dengan CTA yang jelas:
-   - “Nak saya cadangkan routine lengkap + link order?”
-   - atau “Nak order sekarang? Saya bagi link rasmi.”
-6) Jika pelanggan tanya produk lain selain Age-Reverse, jawab secara umum, dan arahkan ke link rasmi:
-   {NK_OFFICIAL_PRODUCTS}
+MISI:
+- bantu pilih produk
+- bina trust
+- convert kepada order
 
-Maklumat penting:
-- Link order rasmi: {NK_OFFICIAL_PRODUCTS}
+RULE WAJIB:
+1. Hanya guna produk dalam catalog.
+2. Jangan cipta produk/harga/ingredient.
+3. Semua link mesti {OFFICIAL_DOMAIN}.
+4. Jawapan pendek (max 8 baris).
 
-Output format:
-- Jangan guna markdown.
-- Gunakan emoji minimal (1-2) bila sesuai.
+SALES FLOW:
+Empathy → Question → Recommend → Routine → CTA.
+
+CTA contoh:
+"Nak saya bagi link order rasmi + cara guna lengkap?"
+
+CATALOG:
+{catalog_text()}
 """
 
-def call_ai(messages: List[Dict[str, str]]) -> Optional[str]:
-    """
-    Uses Groq OpenAI-compatible endpoint by default.
-    Returns assistant content or None on error.
-    """
-    if AI_PROVIDER != "groq":
-        print(f"⚠️ AI_PROVIDER not supported in this code: {AI_PROVIDER}")
-        return None
+# =====================================================
+# GROQ API
+# =====================================================
+def ask_ai(user_text, state):
 
-    if not AI_API_KEY:
-        print("❌ AI_API_KEY missing")
-        return None
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {AI_API_KEY}",
-        "Content-Type": "application/json"
+    payload = {
+        "model": AI_MODEL,
+        "messages": [
+            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"user","content":user_text}
+        ],
+        "temperature":0.7,
+        "max_tokens":250
     }
 
-    body = {
-        "model": AI_MODEL or "llama3-8b-8192",
-        "messages": messages,
-        "temperature": 0.6
-    }
+    r = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization":f"Bearer {AI_API_KEY}",
+            "Content-Type":"application/json"
+        },
+        json=payload,
+        timeout=25
+    )
 
-    try:
-        r = requests.post(url, headers=headers, json=body, timeout=30)
+    data = r.json()
+    return data["choices"][0]["message"]["content"]
 
-        # DEBUG LOGS (Render will show these)
-        print("AI STATUS:", r.status_code)
-        if r.status_code != 200:
-            print("AI ERROR BODY:", r.text[:2000])
-            return None
+# =====================================================
+# RESPONSE ENFORCEMENT
+# =====================================================
+def enforce_official_link(text):
+    urls = re.findall(r"https?://\S+", text)
+    for u in urls:
+        if OFFICIAL_DOMAIN not in u:
+            text = text.replace(u,"")
 
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
+    if OFFICIAL_DOMAIN not in text:
+        text += f"\n\nLink order rasmi:\n{OFFICIAL_ORDER_LINK}"
 
-    except Exception as e:
-        print("AI EXCEPTION:", str(e))
-        return None
+    return text
 
+def closer_engine(reply, state):
 
-# =========================
-# SALES / LEAD LOGIC (Hybrid)
-# - If message short, we guide with flow.
-# - Otherwise we let AI handle with context.
-# =========================
-def normalize_text(s: str) -> str:
-    return (s or "").strip().lower()
+    if state["ready_to_buy"] and not state["asked_contact"]:
+        state["asked_contact"] = True
+        reply += (
+            "\n\n✨ Saya boleh WhatsAppkan routine lengkap "
+            "+ cara guna step-by-step.\n"
+            "Boleh share nama & nombor WhatsApp? 😊"
+        )
 
-def quick_flow_reply(psid: str, user_text: str) -> Optional[str]:
-    """
-    Returns a direct scripted reply if matches simple flow.
-    Otherwise None (then AI handles).
-    """
-    st = get_state(psid)
-    t = normalize_text(user_text)
+    return reply
 
-    # greetings
-    if t in {"hi", "hai", "hello", "helo", "hey", "assalamualaikum", "salam"}:
-        st["stage"] = "ask_skin"
-        return ("Hai 😊 Saya NK Age-Reverse AI. "
-                "Kulit awak lebih kepada kering, berminyak, sensitif atau mudah jerawat?")
+# =====================================================
+# FACEBOOK SEND
+# =====================================================
+def send_fb(psid, text):
 
-    # detect skin types
-    skin_map = {
-        "kering": ["kering", "dry", "kulit kering"],
-        "berminyak": ["berminyak", "oily", "kulit berminyak"],
-        "sensitif": ["sensitif", "sensitive"],
-        "kombinasi": ["kombinasi", "combination", "campur", "mix"],
-        "jerawat": ["jerawat", "acne", "berjerawat", "breakout"]
-    }
+    requests.post(
+        "https://graph.facebook.com/v20.0/me/messages",
+        params={"access_token":PAGE_ACCESS_TOKEN},
+        json={
+            "recipient":{"id":psid},
+            "message":{"text":text},
+            "messaging_type":"RESPONSE"
+        },
+        timeout=20
+    )
 
-    def match_any(words: List[str]) -> bool:
-        return any(w in t for w in words)
+# =====================================================
+# FASTAPI
+# =====================================================
+app = FastAPI()
 
-    if st["stage"] in {"ask_skin", "start"}:
-        for skin, words in skin_map.items():
-            if match_any(words):
-                st["skin_type"] = skin
-                st["stage"] = "ask_concern"
-                return (f"Okay noted: {skin} 👍 "
-                        "Masalah utama awak sekarang apa ya—garis halus, pori besar, kusam, jerawat, atau kulit mudah kering/tegang?")
-
-    # user states concern
-    if st["stage"] == "ask_concern":
-        # quick detect
-        if any(k in t for k in ["garis", "fine line", "kedut", "wrinkle"]):
-            st["concern"] = "garis halus"
-        elif any(k in t for k in ["jerawat", "acne", "breakout", "parut"]):
-            st["concern"] = "jerawat"
-        elif any(k in t for k in ["kusam", "dull", "glow", "cerah"]):
-            st["concern"] = "kusam"
-        elif any(k in t for k in ["pori", "pore"]):
-            st["concern"] = "pori"
-        elif any(k in t for k in ["kering", "tegang", "menggelupas"]):
-            st["concern"] = "kering/tegang"
-        else:
-            # if too vague, let AI
-            return None
-
-        st["stage"] = "pitch_cleanser"
-        return (f"Faham 😊 Untuk {st['skin_type']} + isu {st['concern']}, "
-                "NK Age-Reverse Cleanser memang sesuai sebab bantu bersih tanpa keringkan kulit & support anti-aging.\n\n"
-                "Awak nak routine paling ringkas (cleanser sahaja) atau nak saya cadangkan set 2-3 step sekali?")
-
-    # user wants cleanser
-    if "cleanser" in t or "pencuci" in t or "cuci muka" in t:
-        st["stage"] = "close"
-        return ("Baik 😊 NK Age-Reverse Cleanser memang best untuk start.\n"
-                "Nak saya bagi cara pakai ikut kulit awak + link order rasmi?")
-
-    # If user asks "link" or "order"
-    if any(k in t for k in ["link", "order", "beli", "checkout", "buy"]):
-        st["stage"] = "close"
-        return (f"Ini link rasmi NK (produk skincare): {NK_OFFICIAL_PRODUCTS}\n"
-                "Awak nak saya suggest produk paling sesuai dulu ikut kulit awak? 😊")
-
-    return None
-
-
-def build_ai_messages(psid: str, user_text: str) -> List[Dict[str, str]]:
-    st = get_state(psid)
-    history = st.get("history", [])
-
-    # Add a small context summary (state)
-    state_summary = f"STATE: skin_type={st.get('skin_type')}, concern={st.get('concern')}, stage={st.get('stage')}."
-
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + state_summary}]
-    # include last history
-    for h in history:
-        msgs.append({"role": h["role"], "content": h["content"]})
-    msgs.append({"role": "user", "content": user_text})
-    return msgs
-
-
-# =========================
-# ROUTES
-# =========================
 @app.get("/")
-def root():
-    return {"status": "ok", "service": "osa-messenger-ai", "public_url": PUBLIC_URL or "not_set"}
-
-@app.get("/health")
-def health():
-    return {"ok": True, "ts": now_ts()}
+def home():
+    return {"ok":True}
 
 @app.get("/webhook")
-def verify_webhook(
-    hub_mode: Optional[str] = None,
-    hub_verify_token: Optional[str] = None,
-    hub_challenge: Optional[str] = None,
-    **kwargs
-):
-    """
-    Facebook webhook verification:
-    GET /webhook?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
-    """
-    # FastAPI gives query params differently; support both ways
-    # Sometimes params are passed as "hub.mode" keys
-    if hub_mode is None:
-        # fallback to kwargs
-        hub_mode = kwargs.get("hub.mode")
-        hub_verify_token = kwargs.get("hub.verify_token")
-        hub_challenge = kwargs.get("hub.challenge")
-
-    print("VERIFY REQ:", hub_mode, hub_verify_token, hub_challenge)
-
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        return PlainTextResponse(content=str(hub_challenge or ""), status_code=200)
-
-    return PlainTextResponse(content="Verification token mismatch", status_code=403)
-
+def verify(hub_mode:str="", hub_verify_token:str="", hub_challenge:str=""):
+    if hub_mode=="subscribe" and hub_verify_token==VERIFY_TOKEN:
+        return PlainTextResponse(hub_challenge)
+    return PlainTextResponse("fail",403)
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    """
-    Receive events from Facebook Messenger.
-    """
-    body = await request.json()
-    print("WEBHOOK IN:", json.dumps(body)[:2000])
+async def webhook(req:Request):
 
-    # Acknowledge quickly
-    # Then process
-    if body.get("object") == "page":
-        for entry in body.get("entry", []):
-            messaging_events = entry.get("messaging", [])
-            for event in messaging_events:
-                # Ignore delivery/read echoes
-                if event.get("message") and event["message"].get("is_echo"):
-                    continue
+    body = await req.json()
+    print("IN:", json.dumps(body)[:2000])
 
-                sender = event.get("sender", {}).get("id")
-                if not sender:
-                    continue
+    for entry in body.get("entry",[]):
+        for event in entry.get("messaging",[]):
 
-                # Text message
-                msg = event.get("message", {})
-                text = msg.get("text", "").strip()
-                if not text:
-                    # if attachments etc
-                    send_text_message(sender, "Saya boleh bantu 😊 Boleh taip soalan atau tulis masalah kulit awak ya.")
-                    continue
+            if "message" not in event:
+                continue
 
-                # Save user text
-                add_history(sender, "user", text)
+            sender = event["sender"]["id"]
+            text = event["message"].get("text","")
 
-                # 1) Try quick flow
-                scripted = quick_flow_reply(sender, text)
-                if scripted:
-                    send_text_message(sender, scripted)
-                    add_history(sender, "assistant", scripted)
-                    continue
+            if not text:
+                continue
 
-                # 2) Else AI handles
-                msgs = build_ai_messages(sender, text)
-                ai_reply = call_ai(msgs)
+            state = get_state(sender)
+            state["last_seen"] = time.time()
 
-                if not ai_reply:
-                    fallback = ("Maaf, AI tengah sibuk sekejap. "
-                                "Boleh ulang soalan anda sekali lagi? 🙂\n\n"
-                                f"Link order rasmi: {NK_OFFICIAL_PRODUCTS}")
-                    send_text_message(sender, fallback)
-                    add_history(sender, "assistant", fallback)
-                    continue
+            # detect buying intent
+            detect_buying_signal(state, text)
 
-                # Ensure CTA + link if user shows buying intent
-                low = normalize_text(text)
-                if any(k in low for k in ["order", "beli", "link", "harga", "price", "checkout"]):
-                    if NK_OFFICIAL_PRODUCTS not in ai_reply:
-                        ai_reply = ai_reply.strip() + f"\n\nLink order rasmi: {NK_OFFICIAL_PRODUCTS}"
+            # detect phone
+            phone = extract_phone(text)
+            if phone:
+                send_fb(sender,
+                    "Terima kasih 😊 Team NK akan hubungi anda di WhatsApp sebentar lagi!")
+                continue
 
-                send_text_message(sender, ai_reply)
-                add_history(sender, "assistant", ai_reply)
+            # AI reply
+            try:
+                reply = ask_ai(text, state)
+                reply = enforce_official_link(reply)
+                reply = closer_engine(reply, state)
 
-    return Response(status_code=200)
-=======
-    requests.post(url, params=params, json=payload)
->>>>>>> 93cfbb2 (fix port binding)
+            except Exception as e:
+                print("AI ERROR:", e)
+                reply = f"Boleh ceritakan sedikit masalah kulit anda? 😊\n\n{OFFICIAL_ORDER_LINK}"
+
+            send_fb(sender, reply)
+
+    return JSONResponse({"ok":True})
