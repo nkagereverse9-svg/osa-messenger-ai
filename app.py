@@ -1,374 +1,341 @@
 import os
-import re
-import time
 import json
-import requests
-from typing import Dict, Any, Optional
+import time
+import hashlib
+from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, JSONResponse
+import requests
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
 # =========================
-# ENV VARS (Render -> Environment)
+# ENV
 # =========================
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "nkverify123")  # sama macam Meta verify token
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")   # Page Access Token (Meta)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")             # Groq API key
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
 
-# Groq endpoint (OpenAI-compatible)
-GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").strip().lower()
+AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
+AI_MODEL = os.getenv("AI_MODEL", "llama3-8b-8192").strip()
 
-# Optional: safety / style
-MAX_REPLY_CHARS = 800  # elak reply terlalu panjang (Messenger boleh potong)
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip()
 
-# =========================
-# Simple in-memory user state (stateless -> stateful)
-# NOTE: akan reset bila Render restart. Untuk permanent, nanti upgrade SQLite.
-# =========================
-user_memory: Dict[str, Dict[str, Any]] = {}
+NK_OFFICIAL_PRODUCTS = "https://nkarofficial.com/our-products/skincare/"
+NK_OFFICIAL_DOMAIN = "nkarofficial.com"
 
 # =========================
-# Product knowledge (based on your official site)
-# You can extend this list anytime.
+# SIMPLE IN-MEMORY "STATE"
+# (Render Free instance may sleep => memory resets sometimes)
 # =========================
-BASE_SITE = "https://nkarofficial.com"
+USER_STATE: Dict[str, Dict[str, Any]] = {}
 
-PRODUCTS = {
-    "cleanser": {
-        "name": "NK Age-Reverse Cleanser",
-        "url": f"{BASE_SITE}/our-products/skincare/",
-        "key_benefits": [
-            "Membersih tanpa mengeringkan kulit",
-            "Membantu kurangkan garis halus",
-            "Kulit rasa lebih lembut & glowing"
-        ],
-        "who": "Sesuai untuk kebanyakan jenis kulit (kering/berminyak/normal) — pilih cara guna ikut concern.",
-    },
-    "serum": {
-        "name": "NK Age-Reverse Serum 30ML",
-        "url": f"{BASE_SITE}/our-products/skincare/age-reverse-serum-30ml/",
-        "key_benefits": [
-            "Membantu tingkatkan elastisiti kulit",
-            "Mengurangkan garis halus",
-            "Bantu kulit nampak lebih cerah & segar",
-            "Menyokong penghasilan kolagen"
-        ],
-        "who": "Sesuai untuk yang fokus anti-aging/tekstur/lebih anjal."
-    }
-}
+def now_ts() -> int:
+    return int(time.time())
 
-ORDER_LINK = f"{BASE_SITE}/our-products/skincare/"  # fallback order/catalog link
-
-
-# =========================
-# Helpers: detect intent / skin type / product query
-# =========================
-def normalize_text(s: str) -> str:
-    return (s or "").strip()
-
-def detect_skin_type(text: str) -> Optional[str]:
-    t = text.lower()
-    # common BM keywords
-    if "kering" in t:
-        return "kering"
-    if "berminyak" in t or "minyak" in t:
-        return "berminyak"
-    if "sensitif" in t:
-        return "sensitif"
-    if "jerawat" in t or "acne" in t:
-        return "jerawat"
-    if "normal" in t:
-        return "normal"
-    return None
-
-def detect_concern(text: str) -> Optional[str]:
-    t = text.lower()
-    concerns = [
-        ("garis halus", ["garis halus", "fine line", "wrinkle", "kedut"]),
-        ("jerawat", ["jerawat", "acne", "breakout", "panau", "bintik"]),
-        ("parut", ["parut", "scar", "bekas"]),
-        ("kusam", ["kusam", "dull", "cerah", "glow", "glowing"]),
-        ("pori", ["pori", "pori besar", "blackhead", "whitehead"]),
-        ("kering", ["kering", "flaky", "menggelupas"]),
-        ("berminyak", ["berminyak", "minyak", "oily"]),
-        ("sensitif", ["sensitif", "pedih", "merah", "iritasi"]),
-    ]
-    for label, kws in concerns:
-        if any(k in t for k in kws):
-            return label
-    return None
-
-def detect_product_keyword(text: str) -> Optional[str]:
-    t = text.lower()
-    # detect user ask product
-    if "cleanser" in t or "pencuci" in t or "facial wash" in t or "cuci muka" in t:
-        return "cleanser"
-    if "serum" in t:
-        return "serum"
-    # generic: "produk lain"
-    if "produk lain" in t or "product lain" in t or "apa lagi" in t:
-        return "catalog"
-    return None
-
-def is_buy_intent(text: str) -> bool:
-    t = text.lower()
-    buy_words = [
-        "nak beli", "beli", "order", "checkout", "harga", "rm", "payment",
-        "cod", "pos", "delivery", "stock", "available", "link", "cart", "promo"
-    ]
-    return any(w in t for w in buy_words)
-
-def is_greeting(text: str) -> bool:
-    t = text.lower().strip()
-    return t in ["hi", "hello", "hai", "assalamualaikum", "salam", "hey"]
-
-def get_user_state(sender_id: str) -> Dict[str, Any]:
-    if sender_id not in user_memory:
-        user_memory[sender_id] = {
+def get_state(psid: str) -> Dict[str, Any]:
+    if psid not in USER_STATE:
+        USER_STATE[psid] = {
+            "stage": "start",
             "skin_type": None,
             "concern": None,
-            "stage": "intro",       # intro -> qualify -> recommend -> close
-            "last_product": None,
-            "last_seen": time.time()
+            "budget": None,
+            "last_seen": now_ts(),
+            "history": []  # short history for context
         }
-    user_memory[sender_id]["last_seen"] = time.time()
-    return user_memory[sender_id]
+    USER_STATE[psid]["last_seen"] = now_ts()
+    return USER_STATE[psid]
 
-def clamp_reply(text: str) -> str:
-    text = text.strip()
-    if len(text) <= MAX_REPLY_CHARS:
-        return text
-    return text[:MAX_REPLY_CHARS].rstrip() + "…"
+def add_history(psid: str, role: str, content: str):
+    st = get_state(psid)
+    st["history"].append({"role": role, "content": content})
+    # keep last 8 msgs only
+    st["history"] = st["history"][-8:]
 
 
 # =========================
-# Messenger Send API
+# META MESSENGER SEND API
 # =========================
-def send_message(psid: str, message_text: str) -> None:
+def send_text_message(psid: str, text: str):
     if not PAGE_ACCESS_TOKEN:
-        print("❌ Missing PAGE_ACCESS_TOKEN")
+        print("❌ PAGE_ACCESS_TOKEN missing")
         return
 
-    url = f"https://graph.facebook.com/v20.0/me/messages"
-    params = {"access_token": PAGE_ACCESS_TOKEN}
+    url = "https://graph.facebook.com/v20.0/me/messages"
     payload = {
         "recipient": {"id": psid},
-        "message": {"text": clamp_reply(message_text)}
+        "message": {"text": text},
+        "messaging_type": "RESPONSE",
     }
+    params = {"access_token": PAGE_ACCESS_TOKEN}
 
-    r = requests.post(url, params=params, json=payload, timeout=30)
-    if r.status_code != 200:
-        print("❌ Send API error:", r.status_code, r.text)
+    try:
+        r = requests.post(url, params=params, json=payload, timeout=20)
+        if r.status_code != 200:
+            print("❌ Send API error:", r.status_code, r.text)
+    except Exception as e:
+        print("❌ Send API exception:", str(e))
 
 
 # =========================
-# Groq Chat call
+# AI (Groq OpenAI-Compatible)
 # =========================
-def groq_chat(system_prompt: str, user_prompt: str) -> str:
-    if not GROQ_API_KEY:
-        return "Maaf ya, sistem AI belum disambungkan (GROQ_API_KEY belum set)."
+SYSTEM_PROMPT = f"""
+Anda adalah NK Age-Reverse AI (Malaysia). Tugas: bantu pelanggan memilih skincare NK dan convert kepada order.
 
+RULES (WAJIB):
+1) Gaya bahasa: BM santai + mesra + ringkas tapi convincing. Jangan terlalu panjang meleret.
+2) Fokus sales: tanya soalan susulan yang tepat untuk qualify lead (jenis kulit, masalah utama, rutin sekarang, bajet, dan target result).
+3) Bila pelanggan tanya produk NK apa-apa, jawab dan bagi link rasmi dari domain {NK_OFFICIAL_DOMAIN} jika sesuai.
+4) Jangan claim benda pelik/medical. Jika isu serius (ruam teruk/alergi) sarankan patch test & jumpa doktor.
+5) Sentiasa akhiri dengan CTA yang jelas:
+   - “Nak saya cadangkan routine lengkap + link order?”
+   - atau “Nak order sekarang? Saya bagi link rasmi.”
+6) Jika pelanggan tanya produk lain selain Age-Reverse, jawab secara umum, dan arahkan ke link rasmi:
+   {NK_OFFICIAL_PRODUCTS}
+
+Maklumat penting:
+- Link order rasmi: {NK_OFFICIAL_PRODUCTS}
+
+Output format:
+- Jangan guna markdown.
+- Gunakan emoji minimal (1-2) bila sesuai.
+"""
+
+def call_ai(messages: List[Dict[str, str]]) -> Optional[str]:
+    """
+    Uses Groq OpenAI-compatible endpoint by default.
+    Returns assistant content or None on error.
+    """
+    if AI_PROVIDER != "groq":
+        print(f"⚠️ AI_PROVIDER not supported in this code: {AI_PROVIDER}")
+        return None
+
+    if not AI_API_KEY:
+        print("❌ AI_API_KEY missing")
+        return None
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json"
     }
 
     body = {
-        "model": GROQ_MODEL,
-        "temperature": 0.6,
-        "max_tokens": 350,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        "model": AI_MODEL or "llama3-8b-8192",
+        "messages": messages,
+        "temperature": 0.6
     }
 
     try:
-        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=body, timeout=40)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
+        r = requests.post(url, headers=headers, json=body, timeout=30)
+
+        # DEBUG LOGS (Render will show these)
+        print("AI STATUS:", r.status_code)
+        if r.status_code != 200:
+            print("AI ERROR BODY:", r.text[:2000])
+            return None
+
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+
     except Exception as e:
-        print("❌ Groq error:", str(e))
-        return "Maaf, AI tengah sibuk sekejap. Boleh ulang soalan anda sekali lagi? 🙂"
+        print("AI EXCEPTION:", str(e))
+        return None
 
 
 # =========================
-# Prompt Builder (Agency-level)
+# SALES / LEAD LOGIC (Hybrid)
+# - If message short, we guide with flow.
+# - Otherwise we let AI handle with context.
 # =========================
-def build_system_prompt(state: Dict[str, Any]) -> str:
-    skin_type = state.get("skin_type")
-    concern = state.get("concern")
-    stage = state.get("stage")
-    last_product = state.get("last_product")
+def normalize_text(s: str) -> str:
+    return (s or "").strip().lower()
 
-    # compact product facts
-    cleanser = PRODUCTS["cleanser"]
-    serum = PRODUCTS["serum"]
+def quick_flow_reply(psid: str, user_text: str) -> Optional[str]:
+    """
+    Returns a direct scripted reply if matches simple flow.
+    Otherwise None (then AI handles).
+    """
+    st = get_state(psid)
+    t = normalize_text(user_text)
 
-    return f"""
-You are "NK Age-Reverse AI" — a friendly, persuasive, helpful Malaysian skincare sales consultant (Bahasa Melayu + casual English mix if needed).
-Goal: convert chat into qualified lead + purchase, ethically and naturally.
+    # greetings
+    if t in {"hi", "hai", "hello", "helo", "hey", "assalamualaikum", "salam"}:
+        st["stage"] = "ask_skin"
+        return ("Hai 😊 Saya NK Age-Reverse AI. "
+                "Kulit awak lebih kepada kering, berminyak, sensitif atau mudah jerawat?")
 
-IMPORTANT RULES:
-1) If user skin_type is known, DO NOT ask "jenis kulit" again. Use it.
-2) Keep replies short, clear, and sales-focused (2–6 sentences). Use bullet points only when helpful.
-3) Ask ONLY ONE question at the end to move to next step (qualify / close).
-4) Always include official product/order link when user shows buying intent or asks "nak beli / harga / link / order".
-5) If user asks other product: guide them to official catalog and suggest best match, do not hallucinate.
-6) Avoid medical claims; advise patch test & stop if irritation. Recommend consult professional if serious condition.
+    # detect skin types
+    skin_map = {
+        "kering": ["kering", "dry", "kulit kering"],
+        "berminyak": ["berminyak", "oily", "kulit berminyak"],
+        "sensitif": ["sensitif", "sensitive"],
+        "kombinasi": ["kombinasi", "combination", "campur", "mix"],
+        "jerawat": ["jerawat", "acne", "berjerawat", "breakout"]
+    }
 
-User context:
-- skin_type: {skin_type}
-- concern: {concern}
-- stage: {stage}
-- last_product: {last_product}
+    def match_any(words: List[str]) -> bool:
+        return any(w in t for w in words)
 
-Official links:
-- Catalog/order: {ORDER_LINK}
-- Serum page: {serum['url']}
-- Cleanser catalog: {cleanser['url']}
+    if st["stage"] in {"ask_skin", "start"}:
+        for skin, words in skin_map.items():
+            if match_any(words):
+                st["skin_type"] = skin
+                st["stage"] = "ask_concern"
+                return (f"Okay noted: {skin} 👍 "
+                        "Masalah utama awak sekarang apa ya—garis halus, pori besar, kusam, jerawat, atau kulit mudah kering/tegang?")
 
-Core product facts (use them, do not invent new info):
-CLEANSE: {cleanser['name']}
-Benefits: {", ".join(cleanser['key_benefits'])}
-For: {cleanser['who']}
+    # user states concern
+    if st["stage"] == "ask_concern":
+        # quick detect
+        if any(k in t for k in ["garis", "fine line", "kedut", "wrinkle"]):
+            st["concern"] = "garis halus"
+        elif any(k in t for k in ["jerawat", "acne", "breakout", "parut"]):
+            st["concern"] = "jerawat"
+        elif any(k in t for k in ["kusam", "dull", "glow", "cerah"]):
+            st["concern"] = "kusam"
+        elif any(k in t for k in ["pori", "pore"]):
+            st["concern"] = "pori"
+        elif any(k in t for k in ["kering", "tegang", "menggelupas"]):
+            st["concern"] = "kering/tegang"
+        else:
+            # if too vague, let AI
+            return None
 
-SERUM: {serum['name']}
-Benefits: {", ".join(serum['key_benefits'])}
-For: {serum['who']}
+        st["stage"] = "pitch_cleanser"
+        return (f"Faham 😊 Untuk {st['skin_type']} + isu {st['concern']}, "
+                "NK Age-Reverse Cleanser memang sesuai sebab bantu bersih tanpa keringkan kulit & support anti-aging.\n\n"
+                "Awak nak routine paling ringkas (cleanser sahaja) atau nak saya cadangkan set 2-3 step sekali?")
 
-Conversation strategy:
-- If stage=intro: greet + ask 1 quick qualifier (skin_type OR concern).
-- If stage=qualify: confirm skin_type/concern + suggest product (usually Cleanser first), ask if they want link/harga.
-- If stage=recommend: give tailored routine steps + soft close + ask if they want order link.
-- If stage=close: give link + ask shipping area / payment preference / quantity.
-""".strip()
+    # user wants cleanser
+    if "cleanser" in t or "pencuci" in t or "cuci muka" in t:
+        st["stage"] = "close"
+        return ("Baik 😊 NK Age-Reverse Cleanser memang best untuk start.\n"
+                "Nak saya bagi cara pakai ikut kulit awak + link order rasmi?")
+
+    # If user asks "link" or "order"
+    if any(k in t for k in ["link", "order", "beli", "checkout", "buy"]):
+        st["stage"] = "close"
+        return (f"Ini link rasmi NK (produk skincare): {NK_OFFICIAL_PRODUCTS}\n"
+                "Awak nak saya suggest produk paling sesuai dulu ikut kulit awak? 😊")
+
+    return None
 
 
-def build_user_prompt(user_text: str, state: Dict[str, Any]) -> str:
-    # We can also nudge the model with structured data:
-    return f"""
-User message: {user_text}
+def build_ai_messages(psid: str, user_text: str) -> List[Dict[str, str]]:
+    st = get_state(psid)
+    history = st.get("history", [])
 
-Respond as NK Age-Reverse AI.
-Remember the rules: if skin_type already known, do not ask again.
-End with ONE question to progress toward purchase.
-""".strip()
+    # Add a small context summary (state)
+    state_summary = f"STATE: skin_type={st.get('skin_type')}, concern={st.get('concern')}, stage={st.get('stage')}."
+
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + state_summary}]
+    # include last history
+    for h in history:
+        msgs.append({"role": h["role"], "content": h["content"]})
+    msgs.append({"role": "user", "content": user_text})
+    return msgs
 
 
 # =========================
-# Webhook endpoints
+# ROUTES
 # =========================
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "osa-messenger-ai", "public_url": PUBLIC_URL or "not_set"}
+
+@app.get("/health")
+def health():
+    return {"ok": True, "ts": now_ts()}
 
 @app.get("/webhook")
-def webhook_verify(request: Request):
-    params = dict(request.query_params)
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
+def verify_webhook(
+    hub_mode: Optional[str] = None,
+    hub_verify_token: Optional[str] = None,
+    hub_challenge: Optional[str] = None,
+    **kwargs
+):
+    """
+    Facebook webhook verification:
+    GET /webhook?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
+    """
+    # FastAPI gives query params differently; support both ways
+    # Sometimes params are passed as "hub.mode" keys
+    if hub_mode is None:
+        # fallback to kwargs
+        hub_mode = kwargs.get("hub.mode")
+        hub_verify_token = kwargs.get("hub.verify_token")
+        hub_challenge = kwargs.get("hub.challenge")
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(content=str(challenge), status_code=200)
+    print("VERIFY REQ:", hub_mode, hub_verify_token, hub_challenge)
 
-    return PlainTextResponse(content="Verification failed", status_code=403)
+    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        return PlainTextResponse(content=str(hub_challenge or ""), status_code=200)
+
+    return PlainTextResponse(content="Verification token mismatch", status_code=403)
 
 
 @app.post("/webhook")
-async def webhook_receive(request: Request):
+async def webhook(request: Request):
+    """
+    Receive events from Facebook Messenger.
+    """
     body = await request.json()
+    print("WEBHOOK IN:", json.dumps(body)[:2000])
 
-    # Messenger events
-    if body.get("object") != "page":
-        return JSONResponse({"status": "ignored"}, status_code=200)
-
-    entries = body.get("entry", [])
-    for entry in entries:
-        messaging_events = entry.get("messaging", [])
-        for event in messaging_events:
-            sender = event.get("sender", {})
-            sender_id = sender.get("id")
-
-            # Ignore delivery/read echoes
-            if event.get("message", {}).get("is_echo"):
-                continue
-
-            # Text message
-            if "message" in event and "text" in event["message"]:
-                user_text = normalize_text(event["message"]["text"])
-                if not user_text:
+    # Acknowledge quickly
+    # Then process
+    if body.get("object") == "page":
+        for entry in body.get("entry", []):
+            messaging_events = entry.get("messaging", [])
+            for event in messaging_events:
+                # Ignore delivery/read echoes
+                if event.get("message") and event["message"].get("is_echo"):
                     continue
 
-                state = get_user_state(sender_id)
-
-                # Update memory from user message
-                skin = detect_skin_type(user_text)
-                if skin:
-                    state["skin_type"] = skin
-                    # move stage if needed
-                    if state["stage"] in ["intro", "qualify"]:
-                        state["stage"] = "recommend"
-
-                concern = detect_concern(user_text)
-                if concern:
-                    state["concern"] = concern
-                    if state["stage"] == "intro":
-                        state["stage"] = "qualify"
-
-                prod_key = detect_product_keyword(user_text)
-                if prod_key in ["cleanser", "serum"]:
-                    state["last_product"] = prod_key
-                    if state["stage"] == "intro":
-                        state["stage"] = "qualify"
-
-                # Simple deterministic shortcuts (reduce AI cost, more stable)
-                if is_greeting(user_text) and state.get("stage") == "intro":
-                    reply = (
-                        "Hai 😊 Saya NK Age-Reverse AI. "
-                        "Nak saya cadangkan routine yang sesuai—kulit awak lebih kepada kering, berminyak, sensitif atau mudah jerawat?"
-                    )
-                    send_message(sender_id, reply)
+                sender = event.get("sender", {}).get("id")
+                if not sender:
                     continue
 
-                # If user asks "produk lain"
-                if prod_key == "catalog":
-                    reply = (
-                        f"Boleh 😊 Untuk produk lain, awak boleh tengok katalog rasmi sini: {ORDER_LINK}\n"
-                        "Awak nak fokus masalah apa dulu—kulit berminyak/jerawat, kering, atau garis halus?"
-                    )
-                    send_message(sender_id, reply)
+                # Text message
+                msg = event.get("message", {})
+                text = msg.get("text", "").strip()
+                if not text:
+                    # if attachments etc
+                    send_text_message(sender, "Saya boleh bantu 😊 Boleh taip soalan atau tulis masalah kulit awak ya.")
                     continue
 
-                # If strong buy intent: push close + link
-                if is_buy_intent(user_text):
-                    state["stage"] = "close"
+                # Save user text
+                add_history(sender, "user", text)
 
-                # Build prompts + call Groq
-                system_prompt = build_system_prompt(state)
-                user_prompt = build_user_prompt(user_text, state)
-                ai_reply = groq_chat(system_prompt, user_prompt)
+                # 1) Try quick flow
+                scripted = quick_flow_reply(sender, text)
+                if scripted:
+                    send_text_message(sender, scripted)
+                    add_history(sender, "assistant", scripted)
+                    continue
 
-                # Optional: enforce link in close stage
-                if state["stage"] == "close" and ORDER_LINK not in ai_reply:
-                    ai_reply += f"\n\nLink order rasmi: {ORDER_LINK}"
+                # 2) Else AI handles
+                msgs = build_ai_messages(sender, text)
+                ai_reply = call_ai(msgs)
 
-                send_message(sender_id, ai_reply)
-                continue
+                if not ai_reply:
+                    fallback = ("Maaf, AI tengah sibuk sekejap. "
+                                "Boleh ulang soalan anda sekali lagi? 🙂\n\n"
+                                f"Link order rasmi: {NK_OFFICIAL_PRODUCTS}")
+                    send_text_message(sender, fallback)
+                    add_history(sender, "assistant", fallback)
+                    continue
 
-            # Postback (button)
-            if "postback" in event:
-                payload = event["postback"].get("payload", "")
-                state = get_user_state(sender_id)
-                state["stage"] = "qualify"
-                send_message(sender_id, "Baik 😊 Boleh share jenis kulit awak (kering/berminyak/sensitif/jerawat) supaya saya cadangkan yang tepat?")
-                continue
+                # Ensure CTA + link if user shows buying intent
+                low = normalize_text(text)
+                if any(k in low for k in ["order", "beli", "link", "harga", "price", "checkout"]):
+                    if NK_OFFICIAL_PRODUCTS not in ai_reply:
+                        ai_reply = ai_reply.strip() + f"\n\nLink order rasmi: {NK_OFFICIAL_PRODUCTS}"
 
-    return JSONResponse({"status": "ok"}, status_code=200)
+                send_text_message(sender, ai_reply)
+                add_history(sender, "assistant", ai_reply)
 
-
-@app.get("/")
-def health():
-    return {"status": "ok"}
+    return Response(status_code=200)
