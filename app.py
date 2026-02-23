@@ -1,502 +1,396 @@
 import os
-import time
-import json
 import re
-from typing import Any, Dict, List
+import time
+from typing import Dict, Any, Optional, Tuple, List
 
-import requests
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, JSONResponse
+from flask import Flask, request, jsonify
 
-# =========================================================
-# ENV
-# =========================================================
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
+# pip install groq flask
+from groq import Groq
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").strip().lower()
-AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
-AI_MODEL = os.getenv("AI_MODEL", "llama-3.1-8b-instant").strip()
+app = Flask(__name__)
 
-# Public URL (optional)
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip()
+# -------------------------
+# Config
+# -------------------------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+if not GROQ_API_KEY:
+    raise RuntimeError("Missing GROQ_API_KEY env var")
 
-# OFFICIAL LINKS (IMPORTANT)
-OFFICIAL_DOMAIN = os.getenv("OFFICIAL_DOMAIN", "nkarofficial.com").strip().lower()
+MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+PORT = int(os.getenv("PORT", "5000"))
 
-# Because your old link sometimes 404, keep this configurable
-OFFICIAL_ORDER_LINK = os.getenv("OFFICIAL_ORDER_LINK", "https://nkarofficial.com/").strip()
+# Meta webhook (optional)
+VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "verify_token_change_me")
 
-# WhatsApp (from your screenshot)
-WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "+60199009677").strip()
-WHATSAPP_LINK = os.getenv(
-    "WHATSAPP_LINK",
-    "https://wa.me/60199009677"
-).strip()
+client = Groq(api_key=GROQ_API_KEY)
 
-BRAND_NAME = os.getenv("BRAND_NAME", "NK Age-Reverse").strip()
-
-# =========================================================
-# PRODUCT CATALOG (EDIT this to match your REAL catalog)
-# - AI is FORBIDDEN from inventing products outside this list.
-# - Add/adjust based on your catalog cards.
-# =========================================================
-PRODUCT_CATALOG: List[Dict[str, Any]] = [
-    {
-        "name": "NK Age-Reverse Cleanser",
-        "category": "cleanser",
-        "price_rm": 149,
-        "for_skin": ["berminyak", "kombinasi", "kusam", "garis_halus", "kering", "sensitif"],
-        "benefits": [
-            "Cuci bersih tanpa rasa ketat",
-            "Bantu kurangkan rasa ‘berat’/berminyak di permukaan",
-            "Sesuai untuk rutin pagi & malam"
+# -------------------------
+# Product Knowledge Base (edit ikut latest HQ)
+# -------------------------
+PRODUCTS = {
+    "nk_age_reverse_cleanser_100ml": {
+        "name": "NK Age-Reverse Cleanser 100ml",
+        "price": 149.00,
+        "currency": "RM",
+        "active_ingredients": [
+            "Hyaluronic Acid",
+            "Bee Venom",
+            "Hibiscus sabdariffa (Roselle)",
+            "Camellia japonica (Tsubaki)",
+            "Essential Oil (Geranium, Rosewood, Lavender, Lemon, Peppermint)",
         ],
-        "order_hint": "Cleanser",
-    },
-    {
-        "name": "NK Age-Reverse Serum",
-        "category": "serum",
-        "price_rm": 229,
-        "for_skin": ["kusam", "garis_halus", "kering", "kombinasi"],
-        "benefits": [
-            "Bantu kulit nampak lebih segar & glow (ikut kesesuaian kulit)",
-            "Sesuai untuk kulit nampak kusam / tanda awal penuaan",
+        "best_for": ["kusam", "antiaging", "garis halus", "kulit berminyak (lebih seimbang)"],
+        "how_to_use": [
+            "Basahkan muka, ambil 1-2 pump dan urut lembut 30-60 saat.",
+            "Bilas. Boleh guna pagi & malam.",
         ],
-        "order_hint": "Serum",
-    },
-    {
-        "name": "NK Age-Reverse Sunscreen",
-        "category": "sunscreen",
-        "price_rm": 169,
-        "for_skin": ["semua", "berminyak", "kombinasi", "kering"],
-        "benefits": [
-            "Bantu lindungi kulit waktu siang",
-            "Step penting kalau nak maintain hasil skincare"
+        "notes": [
+            "Jika kulit sensitif/baru tukar skincare: mula 1x sehari dulu 3-5 hari, kemudian naikkan.",
         ],
-        "order_hint": "Sunscreen",
     },
-    {
-        "name": "Energy Water Mist",
-        "category": "mist",
-        "price_rm": 139,
-        "for_skin": ["semua", "kusam", "kering", "dehydrated"],
-        "benefits": [
-            "Bantu refresh kulit bila rasa kering/tegang",
-            "Senang top-up sepanjang hari"
+    "nk_age_reverse_serum_30ml": {
+        "name": "NK Age-Reverse Serum 30ml",
+        "price": 229.00,
+        "currency": "RM",
+        "active_ingredients": [
+            "Encapsulated Nano-Retinol",
+            "Hibiscus sabdariffa flower extract (Roselle)",
+            "Camellia japonica (Tsubaki)",
+            "Paeonia albiflora (Peony)",
+            "Hyaluronic acid (heavy & light molecules)",
+            "Natural herbal extract (Cynanchum Atratum)",
         ],
-        "order_hint": "Mist",
-    },
-    {
-        "name": "Travel Set",
-        "category": "set",
-        "price_rm": 249,
-        "for_skin": ["semua"],
-        "benefits": [
-            "Sesuai untuk cuba dulu / travel",
-            "Convenient untuk beginner"
+        "best_for": ["garis halus", "tekstur kulit", "tone tak sekata"],
+        "how_to_use": [
+            "Selepas cleanser, guna 1-2 titis pada muka kering.",
+            "Pakai malam (untuk pemula).",
+            "Siang WAJIB sunscreen.",
         ],
-        "order_hint": "Travel Set",
-    },
-    {
-        "name": "Premium Box",
-        "category": "set",
-        "price_rm": 649,
-        "for_skin": ["semua"],
-        "benefits": [
-            "Pilihan hadiah / lengkapkan routine",
+        "notes": [
+            "Kalau kulit sensitif, start 2-3x seminggu dulu.",
         ],
-        "order_hint": "Premium Box",
     },
-    {
-        "name": "Two Way Cake",
-        "category": "makeup",
-        "price_rm": 110,
-        "for_skin": ["semua"],
-        "benefits": [
-            "Makeup finishing (ikut kesesuaian kulit)"
+    "nk_age_reverse_sunscreen_30ml": {
+        "name": "NK Age-Reverse Sunscreen 30ml",
+        "price": 169.00,
+        "currency": "RM",
+        "active_ingredients": [
+            "Bee venom",
+            "Hyaluronic Acid",
+            "Hibiscus sabdariffa extract (Roselle)",
+            "Camellia japonica (Tsubaki)",
+            "Paeonia albiflora (Peony)",
+            "Carrot Seed Oil",
         ],
-        "order_hint": "Two Way Cake",
-    },
-    {
-        "name": "NK Rosserie",
-        "category": "skincare",
-        "price_rm": 189,
-        "for_skin": ["semua"],
-        "benefits": [
-            "Skincare support (ikut kesesuaian kulit)"
+        "best_for": ["perlindungan UV", "tak melekit", "ringan"],
+        "how_to_use": [
+            "Pakai sebagai step terakhir waktu siang.",
+            "Reapply setiap 2-3 jam jika outdoor.",
         ],
-        "order_hint": "NK Rosserie",
+        "notes": [],
     },
-]
+    "nk_energy_water_mist_100ml": {
+        "name": "Energy Water Mist 100ml",
+        "price": 139.00,
+        "currency": "RM",
+        "active_ingredients": [
+            "Bee venom",
+            "Hyaluronic acid",
+            "Rose Hydrosol",
+            "Essential Oil (Rose, Geranium, Cedarwood)",
+        ],
+        "best_for": ["hydration", "kulit nampak segar", "comforting mist"],
+        "how_to_use": [
+            "Spray selepas cleanser / bila kulit rasa kering.",
+        ],
+        "notes": [],
+    },
+    "nk_travel_set": {
+        "name": "NK Age-Reverse Travel Set",
+        "price": 249.00,
+        "currency": "RM",
+        "contains": [
+            "Cleanser 30ml",
+            "Sunscreen 10ml",
+            "Serum 10ml",
+            "Energy Water Mist 25ml",
+            "Limited edition pouch bag",
+        ],
+    },
+    "nk_premium_box": {
+        "name": "NK Age-Reverse Premium Box",
+        "price": 649.00,
+        "currency": "RM",
+        "contains": [
+            "Cleanser 100ml",
+            "Sunscreen 30ml",
+            "Serum 30ml",
+            "Energy Water Mist 100ml",
+            "Exclusive box",
+        ],
+    },
+    "nkbt_face_cleanser_100ml": {
+        "name": "NKBT Face Cleanser 100ml",
+        "price": 84.00,
+        "currency": "RM",
+        "active_ingredients": ["Roselle", "Willow Bark", "Provitamin B5"],
+        "best_for": ["kulit berminyak", "acne-prone", "pembersihan lembut"],
+    },
+    "nkbt_creeme_gel_50g": {
+        "name": "NKBT Creeme-Gel 50g",
+        "price": 87.00,
+        "currency": "RM",
+        "active_ingredients": ["Roselle", "Tamanu Oil", "Willow Bark", "Niacinamide"],
+        "best_for": ["kulit berminyak", "acne-prone", "sebum control"],
+    },
+    "nkbt_sun_essence_20g": {
+        "name": "NKBT Sun-Essence 20g",
+        "price": 89.00,
+        "currency": "RM",
+        "active_ingredients": ["Roselle", "Willow Bark", "Provitamin B5"],
+        "best_for": ["UV protection", "ringan", "tak clog pores"],
+    },
+}
 
-# =========================================================
-# IN-MEMORY STATE (Render free may reset when sleeping)
-# =========================================================
-USER_STATE: Dict[str, Dict[str, Any]] = {}
+ORDER_LINKS = {
+    "whatsapp_hq": "https://wa.me/60199009677",
+    # website link kamu kadang 404 pada path tertentu, so bagi homepage + whatsapp
+    "website_home": "https://nkarofficial.com/",
+}
 
-def now_ts() -> int:
-    return int(time.time())
+# -------------------------
+# Simple session memory (in-memory). For production use Redis/DB.
+# -------------------------
+SESSIONS: Dict[str, Dict[str, Any]] = {}
+SESSION_TTL_SEC = 60 * 60 * 12  # 12 hours
 
-def get_state(psid: str) -> Dict[str, Any]:
-    if psid not in USER_STATE:
-        USER_STATE[psid] = {
-            "stage": "start",
-            "skin": "",
-            "concern": "",
-            "intent": "",       # e.g. order/price/routine
-            "interested": False,
-            "last_reco": [],
-            "last_user_text": "",
-        }
-    return USER_STATE[psid]
 
-# =========================================================
-# TEXT NORMALIZATION / DETECTION
-# =========================================================
-def norm(t: str) -> str:
-    return (t or "").strip().lower()
+def now_ts() -> float:
+    return time.time()
 
-def contains_any(t: str, keys: List[str]) -> bool:
-    return any(k in t for k in keys)
 
-def detect_intent(t: str) -> str:
-    # intent priority
-    if contains_any(t, ["harga", "price", "berapa", "rm", "cost"]):
-        return "price"
-    if contains_any(t, ["cara order", "macam mana order", "how to order", "order", "beli", "purchase", "checkout"]):
-        return "order"
-    if contains_any(t, ["link", "website", "url"]):
-        return "link"
-    if contains_any(t, ["routine", "cara guna", "step", "pemakaian", "pakai macam mana"]):
-        return "routine"
-    return ""
+def get_session(user_id: str) -> Dict[str, Any]:
+    s = SESSIONS.get(user_id)
+    if not s or (now_ts() - s.get("ts", 0) > SESSION_TTL_SEC):
+        s = {"ts": now_ts(), "turns": [], "lead_score": 0, "last_link_ts": 0}
+        SESSIONS[user_id] = s
+    s["ts"] = now_ts()
+    return s
 
-def update_skin_concern(state: Dict[str, Any], t: str) -> None:
-    # skin
-    if contains_any(t, ["berminyak", "oily", "minyak"]):
-        state["skin"] = "berminyak"
-    elif contains_any(t, ["kering", "dry"]):
-        state["skin"] = "kering"
-    elif contains_any(t, ["kombinasi", "combination"]):
-        state["skin"] = "kombinasi"
-    elif contains_any(t, ["sensitif", "sensitive", "mudah pedih", "merah", "iritasi"]):
-        state["skin"] = "sensitif"
 
-    # concerns
-    if contains_any(t, ["jerawat", "acne", "breakout", "pimples"]):
-        state["concern"] = "jerawat"
-    elif contains_any(t, ["kusam", "dull", "tak berseri", "gelap"]):
-        state["concern"] = "kusam"
-    elif contains_any(t, ["garis halus", "fine line", "wrinkle", "kedut"]):
-        state["concern"] = "garis_halus"
-    elif contains_any(t, ["menggelupas", "peeling", "flaky", "mengelupas"]):
-        state["concern"] = "menggelupas"
+# -------------------------
+# Intent & lead scoring
+# -------------------------
+PRICE_PAT = re.compile(r"\b(harga|price|rm)\b", re.I)
+ORDER_PAT = re.compile(r"\b(order|cara order|nak beli|purchase|checkout|link)\b", re.I)
+INGR_PAT = re.compile(r"\b(ingredient|ingredients|bahan|aktif|active|bee venom|venom)\b", re.I)
+INTEREST_PAT = re.compile(r"\b(nak|ingin|berminat|try|cuba|recommend|rekomen|sesuai)\b", re.I)
 
-def detect_interest(t: str) -> bool:
-    return contains_any(t, [
-        "nak beli", "nak order", "saya nak", "boleh order", "macam mana beli",
-        "bagi link", "send link", "ok saya ambil", "ambil", "deal"
-    ])
 
-def interpret_colloquial(t: str) -> str:
-    # Normalize common Malaysian chat slang
-    # "tak guna dua dua" => user means they don't use both (cleanser & serum)
-    if contains_any(t, ["dua dua", "dua-dua", "2 2", "2-2"]):
-        if contains_any(t, ["tak", "tidak", "x", "takde"]):
-            return "tak_guna_kedua"
-    return ""
+def detect_intents(text: str) -> Dict[str, bool]:
+    return {
+        "ask_price": bool(PRICE_PAT.search(text)),
+        "ask_order": bool(ORDER_PAT.search(text)),
+        "ask_ingredients": bool(INGR_PAT.search(text)),
+        "show_interest": bool(INTEREST_PAT.search(text)),
+    }
 
-# =========================================================
-# RECOMMENDATION LOGIC (rule-based, to keep answers consistent)
-# =========================================================
-def pick_products(skin: str, concern: str) -> List[Dict[str, Any]]:
-    picks = []
 
-    def add_if(name: str):
-        for p in PRODUCT_CATALOG:
-            if p["name"].lower() == name.lower():
-                picks.append(p)
+def bump_lead_score(sess: Dict[str, Any], intents: Dict[str, bool]) -> None:
+    score = sess.get("lead_score", 0)
+    if intents["show_interest"]:
+        score += 2
+    if intents["ask_price"]:
+        score += 3
+    if intents["ask_order"]:
+        score += 4
+    if intents["ask_ingredients"]:
+        score += 1
+    sess["lead_score"] = min(score, 20)
 
-    # Simple bundle logic
-    if concern in ["kusam", "garis_halus"]:
-        add_if("NK Age-Reverse Cleanser")
-        add_if("NK Age-Reverse Serum")
-    elif skin == "berminyak":
-        add_if("NK Age-Reverse Cleanser")
-        # for oily + daytime protection
-        add_if("NK Age-Reverse Sunscreen")
-    elif concern == "menggelupas":
-        # be gentle: cleanser + mist suggestion
-        add_if("NK Age-Reverse Cleanser")
-        add_if("Energy Water Mist")
-    else:
-        add_if("NK Age-Reverse Cleanser")
 
-    # Remove duplicates while preserving order
-    seen = set()
-    uniq = []
-    for p in picks:
-        if p["name"] not in seen:
-            uniq.append(p)
-            seen.add(p["name"])
-    return uniq[:2]
+def should_send_link(sess: Dict[str, Any], intents: Dict[str, bool]) -> bool:
+    # Only send link when customer is hot OR explicitly asking
+    if intents["ask_order"] or intents["ask_price"]:
+        return True
+    if sess.get("lead_score", 0) >= 7:
+        return True
+    return False
 
-def format_price_line(p: Dict[str, Any]) -> str:
-    pr = p.get("price_rm")
-    if pr:
-        return f"• {p['name']} — RM {pr}"
-    return f"• {p['name']}"
 
-# =========================================================
-# HUMAN SALES PSYCHOLOGY PROMPT (AI)
-# =========================================================
-def catalog_text() -> str:
+def link_cooldown_ok(sess: Dict[str, Any]) -> bool:
+    # avoid link spam: at most once per 10 minutes
+    return (now_ts() - sess.get("last_link_ts", 0)) > 600
+
+
+# -------------------------
+# Ingredient lookup helper
+# -------------------------
+def find_product_by_keyword(text: str) -> List[Dict[str, Any]]:
+    t = text.lower()
+    hits = []
+    for p in PRODUCTS.values():
+        name = p.get("name", "").lower()
+        if "cleanser" in t and "cleanser" in name:
+            hits.append(p)
+        elif "serum" in t and "serum" in name:
+            hits.append(p)
+        elif "sunscreen" in t and "sunscreen" in name:
+            hits.append(p)
+        elif "mist" in t and ("mist" in name or "water" in name):
+            hits.append(p)
+        elif "nkbt" in t and "nkbt" in name:
+            hits.append(p)
+    return hits
+
+
+def product_price_list() -> str:
+    # Short, human-friendly price list
     lines = []
-    for p in PRODUCT_CATALOG:
-        lines.append(
-            f"- {p['name']} | kategori: {p['category']} | harga: RM {p.get('price_rm','-')} | sesuai: {', '.join(p['for_skin'])}"
-        )
+    for key in [
+        "nk_age_reverse_cleanser_100ml",
+        "nk_age_reverse_serum_30ml",
+        "nk_age_reverse_sunscreen_30ml",
+        "nk_energy_water_mist_100ml",
+        "nk_travel_set",
+        "nk_premium_box",
+        "nkbt_face_cleanser_100ml",
+        "nkbt_creeme_gel_50g",
+        "nkbt_sun_essence_20g",
+    ]:
+        p = PRODUCTS.get(key)
+        if not p:
+            continue
+        lines.append(f"• {p['name']} — {p['currency']}{p['price']:.2f}")
     return "\n".join(lines)
 
-SYSTEM_PROMPT = f"""
-Anda ialah “{BRAND_NAME} Human Sales Assistant” — gaya manusia, mesra & santai (macam admin betul) 😄
 
-WAJIB:
-1) Hanya sebut produk yang ada dalam PRODUCT_CATALOG.
-2) Jangan cipta produk / jangan cipta fakta ingredient / jangan claim berlebihan.
-3) Jangan spam link. Link hanya bagi bila user minta “link/cara order/harga” atau user dah menunjukkan minat nak beli.
-4) Bila user tanya harga — jawab terus dengan harga (RM) ikut catalog.
-5) Bila user tanya cara order — beri 2 pilihan:
-   A) Website: {OFFICIAL_ORDER_LINK}
-   B) WhatsApp HQ: {WHATSAPP_NUMBER} ({WHATSAPP_LINK})
-6) Bahasa BM santai + emoji (1–3 emoji sahaja), ayat pendek, nampak natural.
+# -------------------------
+# SYSTEM PROMPT (Human + Sales Psychology Mode)
+# -------------------------
+SYSTEM_PROMPT = """
+You are NK Age-Reverse's friendly human-like sales assistant on chat.
+Goal: help customer choose suitable products, answer questions, and guide them to order.
+Style:
+- Sound like a real Malaysian human (casual, warm, helpful), use light emojis (1–3) naturally.
+- NEVER spam links. Only share ordering links when user asks for price/order OR they show strong interest.
+- Keep replies short, clear, and conversational (2–6 lines). Ask 1 simple question at a time.
+- Be honest: if you don't know, say you’ll check and offer the official info.
+Sales psychology:
+- Mirror their concern, reassure, give 1–2 tailored options, and a soft CTA.
+- If user asks "harga" -> give price + simple order steps + ask for area/state for shipping if needed.
+- If user asks ingredients/bee venom -> answer based on provided product database. If mismatch/uncertain -> say "Based on official product page/label..."
+Safety:
+- Do not give medical diagnosis. Suggest patch test for sensitive skin and stop if irritation.
+"""
 
-GAYA “CLOSER MODE” (soft):
-- Tanya 1 soalan sahaja kalau info kurang.
-- Bila user dah jelas berminat: ajak pilih “Cleanser sahaja” atau “Cleanser + Serum”.
-- Guna CTA lembut: “Nak saya bantu pilih set paling ngam?” / “Nak saya bagi step cara pakai?” / “Nak saya tolong orderkan?”
+def build_context(user_id: str, user_text: str) -> List[Dict[str, str]]:
+    sess = get_session(user_id)
+    intents = detect_intents(user_text)
+    bump_lead_score(sess, intents)
 
-OUTPUT:
-- Maks 6–10 baris sahaja.
-- Jangan tulis label pelik macam “Empati:” “Question:”.
-- Jangan ulang link setiap mesej.
+    # Build extra knowledge snippet
+    kb = []
+    kb.append("PRICE LIST:\n" + product_price_list())
+    kb.append("ORDER LINKS:\n" + f"Website: {ORDER_LINKS['website_home']}\nWhatsApp HQ: {ORDER_LINKS['whatsapp_hq']}")
 
-PRODUCT_CATALOG:
-{catalog_text()}
-""".strip()
+    # Ingredient answering assist
+    if intents["ask_ingredients"]:
+        hits = find_product_by_keyword(user_text)
+        if hits:
+            ingr_lines = []
+            for p in hits[:2]:
+                if p.get("active_ingredients"):
+                    ingr_lines.append(f"{p['name']} active ingredients: {', '.join(p['active_ingredients'])}")
+            if ingr_lines:
+                kb.append("INGREDIENT NOTES:\n" + "\n".join(ingr_lines))
 
-def build_user_prompt(user_text: str, state: Dict[str, Any], reco: List[Dict[str, Any]]) -> str:
-    reco_names = [p["name"] for p in reco]
-    return f"""
-STATE:
-stage={state.get('stage')}
-skin={state.get('skin')}
-concern={state.get('concern')}
-intent={state.get('intent')}
-interested={state.get('interested')}
-last_reco={reco_names}
+    # Decide whether to include link instruction
+    send_link = should_send_link(sess, intents) and link_cooldown_ok(sess)
+    sess["send_link_now"] = bool(send_link)
+    if send_link:
+        sess["last_link_ts"] = now_ts()
 
-USER:
-{user_text}
+    # Store last user text
+    sess["turns"].append({"role": "user", "content": user_text})
+    sess["turns"] = sess["turns"][-10:]  # keep last 10
 
-TASK:
-- Balas ikut rules & gaya “human”.
-- Jika user tanya harga/cara order, jawab terus + bagi pilihan website/WhatsApp.
-- Jika user berminat, bantu close (pilihan set) tanpa memaksa.
-""".strip()
+    messages = [{"role": "system", "content": SYSTEM_PROMPT.strip()}]
+    messages.append({"role": "system", "content": "\n\n".join(kb)})
 
-def strip_non_official_urls(text: str) -> str:
-    urls = re.findall(r"https?://\S+", text)
-    for u in urls:
-        # allow only official domain + wa.me link
-        if (OFFICIAL_DOMAIN not in u) and ("wa.me" not in u):
-            text = text.replace(u, "")
-    return text.strip()
+    # Add small instruction about link if not allowed now
+    if not send_link:
+        messages.append({"role": "system", "content": "Do NOT include any URL in your reply for this turn."})
+    else:
+        messages.append({"role": "system", "content": "You MAY include at most 1 ordering link (prefer WhatsApp HQ) if it helps."})
 
-def safe_fallback_reply(state: Dict[str, Any]) -> str:
-    # fallback = still human + ask 1 question only
-    if state.get("skin"):
-        return f"Okay 😊 Kulit {state['skin']} ya. Awak lebih risau pasal kusam, jerawat, atau nak control minyak je?"
-    return "Hi 😊 Awak kulit jenis kering, berminyak, kombinasi atau sensitif ya?"
+    # Conversation history
+    for t in sess["turns"]:
+        messages.append(t)
 
-# =========================================================
-# GROQ CALL (OpenAI-compatible endpoint)
-# =========================================================
-def call_groq_chat(system: str, user: str, model: str) -> str:
-    if not AI_API_KEY:
-        raise RuntimeError("AI_API_KEY not set")
+    return messages
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {AI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.7,
-        "max_tokens": 260,
-    }
 
-    r = requests.post(url, headers=headers, json=payload, timeout=25)
-    if r.status_code >= 400:
-        raise RuntimeError(f"AI HTTP {r.status_code}: {r.text}")
+def groq_reply(user_id: str, user_text: str) -> str:
+    messages = build_context(user_id, user_text)
 
-    data = r.json()
-    return data["choices"][0]["message"]["content"]
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=0.6,
+        max_tokens=250,
+        top_p=0.9,
+    )
+    text = resp.choices[0].message.content.strip()
 
-# =========================================================
-# FB MESSENGER SEND
-# =========================================================
-def fb_send_text(psid: str, text: str) -> None:
-    if not PAGE_ACCESS_TOKEN:
-        raise RuntimeError("PAGE_ACCESS_TOKEN not set")
+    # Hard rule: if send_link_now is False, remove any accidental URLs
+    sess = get_session(user_id)
+    if not sess.get("send_link_now", False):
+        text = re.sub(r"https?://\S+", "", text).strip()
 
-    url = "https://graph.facebook.com/v20.0/me/messages"
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    payload = {
-        "recipient": {"id": psid},
-        "message": {"text": text},
-        "messaging_type": "RESPONSE",
-    }
+    # Keep it tidy
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
 
-    r = requests.post(url, params=params, json=payload, timeout=20)
-    if r.status_code >= 400:
-        raise RuntimeError(f"FB SEND ERROR {r.status_code}: {r.text}")
 
-# =========================================================
-# RULE-BASED DIRECT ANSWERS (price/order/link) to avoid AI mistakes
-# =========================================================
-def direct_price_reply(state: Dict[str, Any]) -> str:
-    skin = state.get("skin", "")
-    concern = state.get("concern", "")
-    reco = pick_products(skin, concern)
-    if not reco:
-        reco = PRODUCT_CATALOG[:2]
+# -------------------------
+# API: simple chat test
+# -------------------------
+@app.post("/chat")
+def chat():
+    data = request.get_json(force=True, silent=True) or {}
+    user_id = str(data.get("user_id", "demo_user"))
+    text = str(data.get("text", "")).strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
 
-    lines = ["Sure 😊 Ini range harga (catalog HQ):"]
-    for p in reco:
-        lines.append(format_price_line(p))
+    reply = groq_reply(user_id, text)
+    return jsonify({"reply": reply, "user_id": user_id})
 
-    lines.append("")
-    lines.append("Nak awak prefer ambil *Cleanser sahaja* atau *Cleanser + Serum*? 😉")
-    return "\n".join(lines).strip()
 
-def direct_order_reply() -> str:
-    return (
-        "Boleh 😊 Cara order ada 2 cara:\n"
-        f"1) Website rasmi: {OFFICIAL_ORDER_LINK}\n"
-        f"2) WhatsApp HQ: {WHATSAPP_NUMBER} ({WHATSAPP_LINK})\n\n"
-        "Kalau awak bagitahu nak produk mana, saya susunkan step & confirm total ya 😉"
-    ).strip()
-
-def maybe_add_link_only_when_needed(text: str, intent: str, interested: bool) -> str:
-    text = strip_non_official_urls(text)
-
-    # Only attach order options if user asks or is clearly interested
-    if intent in ["order", "link"] or interested:
-        # if AI didn't include any official links, add a short CTA footer
-        if (OFFICIAL_DOMAIN not in text) and ("wa.me" not in text):
-            text += (
-                f"\n\nOrder:\n"
-                f"• Website: {OFFICIAL_ORDER_LINK}\n"
-                f"• WhatsApp HQ: {WHATSAPP_NUMBER} ({WHATSAPP_LINK})"
-            )
-    return text.strip()
-
-# =========================================================
-# FASTAPI APP
-# =========================================================
-app = FastAPI()
-
-@app.get("/")
-def home():
-    return {"ok": True, "service": "osa-messenger-ai", "ts": now_ts()}
-
+# -------------------------
+# Meta Webhook (Optional)
+# You still need to implement send message via Graph API with PAGE_ACCESS_TOKEN.
+# Here we provide webhook receive + verify only.
+# -------------------------
 @app.get("/webhook")
-def verify_webhook(hub_mode: str = "", hub_verify_token: str = "", hub_challenge: str = ""):
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        return PlainTextResponse(hub_challenge)
-    return PlainTextResponse("Verification token mismatch", status_code=403)
+def webhook_verify():
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return challenge or "", 200
+    return "Verification failed", 403
+
 
 @app.post("/webhook")
-async def webhook(request: Request):
-    body = await request.json()
-    print("WEBHOOK IN:", json.dumps(body)[:4000])
+def webhook_receive():
+    # This receives Meta events. You must add Graph API call to send response.
+    payload = request.get_json(force=True, silent=True) or {}
+    # For now just acknowledge.
+    return jsonify({"status": "ok"}), 200
 
-    if body.get("object") != "page":
-        return JSONResponse({"ok": True})
 
-    for entry in body.get("entry", []):
-        for event in entry.get("messaging", []):
-            if "message" not in event:
-                continue
-
-            sender = event["sender"]["id"]
-            message = event["message"]
-
-            if message.get("is_echo"):
-                continue
-
-            text = (message.get("text") or "").strip()
-            if not text:
-                continue
-
-            state = get_state(sender)
-            t = norm(text)
-            state["last_user_text"] = text
-
-            # detect intent + interest
-            state["intent"] = detect_intent(t)
-            state["interested"] = detect_interest(t) or state.get("interested", False)
-
-            # interpret colloquial
-            slang = interpret_colloquial(t)
-            if slang == "tak_guna_kedua":
-                # treat as: user doesn't use both cleanser & serum
-                # push toward a simple recommendation flow
-                if not state.get("skin"):
-                    state["skin"] = "berminyak" if "minyak" in t else state.get("skin", "")
-
-            # update skin + concern
-            update_skin_concern(state, t)
-
-            # stage shift
-            if state["stage"] == "start" and (state.get("skin") or state.get("concern")):
-                state["stage"] = "qualify"
-
-            # Direct rule-based replies for price/order to avoid AI hallucination
-            try:
-                if state["intent"] == "price":
-                    reply = direct_price_reply(state)
-                elif state["intent"] in ["order", "link"]:
-                    reply = direct_order_reply()
-                else:
-                    # Normal recommendation
-                    reco = pick_products(state.get("skin", ""), state.get("concern", ""))
-                    state["last_reco"] = [p["name"] for p in reco]
-
-                    user_prompt = build_user_prompt(text, state, reco)
-
-                    if AI_PROVIDER == "groq":
-                        reply = call_groq_chat(SYSTEM_PROMPT, user_prompt, AI_MODEL)
-                    else:
-                        reply = safe_fallback_reply(state)
-
-                reply = maybe_add_link_only_when_needed(reply, state["intent"], state["interested"])
-
-            except Exception as e:
-                print("AI ERROR:", str(e))
-                reply = safe_fallback_reply(state)
-
-            # Send back to Messenger
-            try:
-                fb_send_text(sender, reply)
-            except Exception as e:
-                print("FB SEND ERROR:", str(e))
-
-    return JSONResponse({"ok": True})
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT)
