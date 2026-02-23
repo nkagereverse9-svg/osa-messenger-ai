@@ -3,4 +3,4 @@ uvicorn
 gunicorn
 requests
 groq
-python-dotnev
+python-dotenv
