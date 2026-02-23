@@ -1,4 +1,6 @@
-flask
-groq
+fastapi
+uvicorn
 gunicorn
-python-dotenv
+requests
+groq
+python-dotnev
